@@ -1,0 +1,350 @@
+---
+title: "Machine Learning Coursera Class Project"
+author: "Liliana"
+date: "January 12, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Project Description
+
+"The goal of this project is to predict the manner in which an individual did a weight litfting exercise.The data was obtained from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. Participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes." Exercise description and  and Data collection was taken from http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf and http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+
+```{r libraries,echo=FALSE, message=FALSE, warning=FALSE}
+library(doBy) #Summaryby
+library(ggplot2)
+library(caret)
+library(spectral)
+library (plyr)
+library(dplyr)
+library(stringr)
+library(gridExtra)
+library(randomForest)
+library(e1071)
+#
+setwd("~/Grajales_2013/DataAnalytics/DA_R/Coursera/R_Script/R_MachineLearning")
+dat = read.csv("~/Grajales_2013/DataAnalytics/DA_R/Coursera/R_Script/R_MachineLearning/pml-training.csv", header=TRUE, sep=",")
+dat_testing = read.csv("~/Grajales_2013/DataAnalytics/DA_R/Coursera/R_Script/R_MachineLearning/pml-testing.csv", header=TRUE, sep=",")
+#########################################
+```
+## Coursera Class Test Data Limitations and Class Quiz Response
+The test data set given in the Machine Learning Course Project for testing the trained model was not accurately selected for the following reasons:
+
+1. The data is collected in the time domain and hence by merely observing the time stamp of the test data, one could predict the "class" or exercise routine a particular participant was following with 100% accuracy, so no model is required but a simple correlation between the train and test data using the variable "raw_timestamp_part_1".
+
+2. The test data does not include the covariates used in the trained data, such as average, standard deviation, kurtosis, max, or min values. Without these covariates in the test data, one could not verify the trained model since there is only one test data point provided per participant and class so the average, min, max, kurtosis, etc., covariates cannot be calculated. 
+
+Below, I show an example of the test data provided in class and the code I used to obtained the project quiz answers. In the following sections, I propose a new distribution of the train and test data and the models created with this new data distribution. 
+
+```{r quiz,echo=FALSE, message=FALSE, warning=FALSE}
+#Quiz Answer 
+dat_testing[1,1:20] #Test data example
+dat_simple<-dat[,c("user_name","raw_timestamp_part_1","classe")] # selecting minimum number of variables needed for quiz 
+dat_simple<-dat_simple[!duplicated(dat_simple$raw_timestamp_part_1),]#removing duplicates
+test_simple<-dat_testing[,c("X","user_name","raw_timestamp_part_1")]# selecting minimum number of variables needed for quiz
+```
+
+```{r quiz_answer,echo=TRUE, message=FALSE, warning=FALSE}
+Pre_answer<-merge(test_simple,dat_simple,by=c("raw_timestamp_part_1")) #aligning test with training data by timestamp1
+answer<-Pre_answer[,c("X","classe")]
+answer<-answer[order(answer$X),]
+colnames(answer)<-c("Question", "Answer")
+rownames(answer) <- NULL
+answer[1:4,] 
+#partial answers provided to prevent copying
+
+```
+
+## Data Exploration
+The trained data included two variables called "raw_timestamp_part_1" and "raw_timestamp_part_2", although I could not find its units description, based on the continuity of the data, I assumed that "raw_timestamp_part_1" had an integer unit (like seconds) and that raw_timestamp_part_2 was in 1/10^6 of that unit (like microseconds). In the authors pdf document, it is mentioned that the data was taken at 45Hz sampling rate, I tried this assumption initially but because there is no information on the Bluetooth data packet transmission and overall data collection, I defaulted to use the rawtimestamps provided in their document with the units of seconds and microseconds. So when the data is plotted over time, then one could observe the repetions done by each individual for each class (see plots for "magnet_arm_x" and "accel_dumbbell_y")
+
+
+```{r exploratory, echo=FALSE, message=FALSE, warning=FALSE}
+MinTime<- summaryBy(list(c("raw_timestamp_part_1"),c("user_name","classe")), data=dat, FUN=c(min))
+#MinTime
+dat_norm <- merge(dat,MinTime,by=c("user_name","classe"))
+dat_norm$NormT<-dat_norm$raw_timestamp_part_1 - dat_norm$raw_timestamp_part_1.min + (dat_norm$raw_timestamp_part_2/10^6)
+#write.table(dat_norm, file="dat_norm.csv", col.names=TRUE, row.names=FALSE, sep=",")# for Tableau
+dat_main<-dat_norm[,c("user_name","classe","NormT","roll_dumbbell", "pitch_dumbbell", "accel_arm_x","accel_arm_y","accel_arm_z", "accel_dumbbell_x","accel_dumbbell_y","accel_forearm_y","gyros_arm_x","gyros_arm_y","gyros_belt_z","magnet_arm_x","magnet_arm_y","magnet_arm_z","magnet_belt_x","magnet_belt_y","magnet_belt_z","magnet_dumbbell_x","magnet_dumbbell_z","magnet_forearm_x","magnet_forearm_y","magnet_forearm_z")]
+#"magnet_belt_x" example of not so good info
+#"magnet_dumbbell_z" example of not so good info
+g1 <- ggplot(dat_main, aes(dat_main$NormT,dat_main$magnet_arm_x,  color = dat_main$classe)) + geom_line() + facet_grid(user_name~classe)+
+  xlab("time") + ylab("(Magnet)")+  ggtitle("magnet_arm_x") +
+  #scale_x_continuous(limits = c(0, EngHours_end))+theme(axis.text=element_text(size=12), axis.title=element_text(size=12,face="bold"))+
+  #scale_y_continuous(limits = c(-100, 500000))+
+  theme_bw() + theme(axis.text=element_text(size=7))+
+  theme(axis.line=element_blank(),legend.position="none",panel.background=element_blank(), panel.border=element_blank(), 
+        panel.grid.minor=element_blank(), plot.background=element_blank()) #panel.grid.major=element_blank(),
+
+g1
+
+g2 <- ggplot(dat_main, aes(dat_main$NormT,dat_main$accel_dumbbell_y,  color = dat_main$classe)) + geom_line() + facet_grid(user_name~classe)+
+  xlab("time") + ylab("(Acc)")+  ggtitle("accel_dumbbell_y") +
+  #scale_x_continuous(limits = c(0, EngHours_end))+theme(axis.text=element_text(size=12), axis.title=element_text(size=12,face="bold"))+
+  #scale_y_continuous(limits = c(-100, 500000))+
+  theme_bw() + theme(axis.text=element_text(size=7))+
+  theme(axis.line=element_blank(),legend.position="none",panel.background=element_blank(), panel.border=element_blank(), 
+        panel.grid.minor=element_blank(), plot.background=element_blank()) #panel.grid.major=element_blank(),
+g2
+Difmxmn<-function(x){max(x)- min(x)}
+AverrollDB<- summaryBy(list(c("roll_dumbbell"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverpitchDB<- summaryBy(list(c("pitch_dumbbell"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverAccArmX<- summaryBy(list(c("accel_arm_x"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverAccArmY<- summaryBy(list(c("accel_arm_y"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverAccArmZ<- summaryBy(list(c("accel_arm_z"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverAccDBX<- summaryBy(list(c("accel_dumbbell_x"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverAccDBY<- summaryBy(list(c("accel_dumbbell_y"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverAccForeAY<- summaryBy(list(c("accel_forearm_y"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverGyArmX<- summaryBy(list(c("gyros_arm_x"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverGyArmY<- summaryBy(list(c("gyros_arm_y"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverGyBeltZ<- summaryBy(list(c("gyros_belt_z"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverMagArmX<- summaryBy(list(c("magnet_arm_x"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverMagArmY<- summaryBy(list(c("magnet_arm_y"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverMagArmZ<- summaryBy(list(c("magnet_arm_z"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverMagBeltY<- summaryBy(list(c("magnet_belt_y"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverMagBeltZ<- summaryBy(list(c("magnet_belt_z"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverMagDBX<- summaryBy(list(c("magnet_dumbbell_x"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverMagDBZ<- summaryBy(list(c("magnet_dumbbell_z"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverMagForeAX<- summaryBy(list(c("magnet_forearm_x"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverMagForeAY<- summaryBy(list(c("magnet_forearm_y"),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+AverMagForeAZ<- summaryBy(list(c("magnet_forearm_z "),c("user_name","classe")), data=dat_main, FUN=c(mean,sd,Difmxmn))
+Aver_All<-cbind(AverrollDB,AverpitchDB,AverAccArmX,AverAccArmY,AverAccArmZ,AverAccDBX,AverAccDBY,AverAccForeAY,AverGyArmX,AverGyArmY,AverGyBeltZ,AverMagArmX,AverMagArmY,AverMagArmZ,AverMagBeltY,AverMagBeltZ,AverMagDBX,AverMagDBZ,AverMagForeAX,AverMagForeAY,AverMagForeAZ)
+Aver_All <- Aver_All[, !duplicated(colnames(Aver_All))]
+
+```
+
+## Proposed Train and Test set
+Since the objective of the project is to identify the "class" of the exercise being performed by an individual and because the data has continous cycles (patterns) in the time domain, I assumed that those cycles shall be included in the test data. So,I assumed the test data to be the data of one participant. In this report, I used "carlitos" test data to identify the best model strategy. I verify the model's accuracy with the selected "carlitos" test set. Following up, I decided to test the model strategy in the case that other users were selected as the test set. Since it was easy to do, I try each of the 6 users for the final model selection.
+
+```{r exploratory2, echo=TRUE, message=FALSE, warning=FALSE}
+#################
+# Test data = "Carlitos" data
+Aver_Train<-subset(Aver_All, !Aver_All$user_name=="carlitos")
+Aver_Test<-subset(Aver_All, Aver_All$user_name=="carlitos")
+Aver_Train2<-Aver_Train[,-1] #removing user name from model prediction evaluation
+Aver_Test2<-Aver_Test[,-1]
+```
+
+## Model Comparison
+Random forest is the first model tested, its accuracy and a list of the variable importance is shown below. 
+
+```{r rf1, echo=TRUE, message=FALSE, warning=FALSE}
+
+###############################
+#Basic Random Forest
+set.seed(62433)
+ForestTrain <- train(classe ~ ., method="rf", data=Aver_Train2)
+predRF<-predict(ForestTrain,Aver_Test2)
+table(predRF,Aver_Test2$classe)
+cm<-confusionMatrix(data=predRF, Aver_Test2$classe); overall <- cm$overall; overall
+varImp(ForestTrain)
+#################
+```
+
+## Adding new variables and repeating basic random forest
+In order to improve the variable importance scoring, I included a set of covariates evaluated with the spectral package, which uses the fast fourier transformation to obtain fundamental frequequencies and  their magnitudes. Hence the new covariates included the mean frequency and the maximum magnitude. 
+
+```{r rf2a, echo=TRUE, message=FALSE, warning=FALSE}
+#################
+AvFreq_Amp<- function(x,y){
+  Spec_X<-spec.fft(y=y, x=x) # applying fast fourier transform
+  AvFreq<-mean(Spec_X$fx) # collecting the mean frequency
+  Mag_X<-sqrt(Re(Spec_X$A)^2+Im(Spec_X$A)^2) #calculating the magnitude
+  MaxA<-max(Mag_X)               #selecting the maximum magnitude
+  result<-data.frame("FreqMean"=AvFreq*100000,"Mag"=MaxA)
+  return(result)}
+```
+This function is applied to all the corresponding signals, with x=time, and y=magnet_arm_x for example, with outputs defined as "FreqmagArmX" and "AmpmagArmX", steps not shown. 
+As the new variable list below shows, there was a slight increase on the variables overall contribution showing Frequency and maximum magnitude (Amp) appearing with higher importance over previous variables. Nevertheless, after running the random forest model with this new variables, the accuracy did not increase over 60%. Hence, I tried new models as shown in following sessions.
+```{r rf2b, echo=FALSE, message=FALSE, warning=FALSE}
+FreqAmp_rollDB<-lapplyBy(~c(user_name,classe), data=dat_main, function(x) AvFreq_Amp(x$NormT,x$roll_dumbbell))
+FreqAmp_rollDB <- ldply (FreqAmp_rollDB, data.frame)
+colnames(FreqAmp_rollDB)<-c("id","FreqrollDB","AmprollDB")
+FreqAmp_pitchDB<-lapplyBy(~c(user_name,classe), data=dat_main, function(x) AvFreq_Amp(x$NormT,x$pitch_dumbbell))
+FreqAmp_pitchDB <- ldply (FreqAmp_pitchDB, data.frame)
+colnames(FreqAmp_pitchDB)<-c("id","FreqpitchDB","AmppitchDB")
+FreqAmp_magArmX<-lapplyBy(~c(user_name,classe), data=dat_main, function(x) AvFreq_Amp(x$NormT,x$magnet_arm_x))
+FreqAmp_magArmX <- ldply (FreqAmp_magArmX, data.frame)
+colnames(FreqAmp_magArmX)<-c("id","FreqmagArmX","AmpmagArmX")
+FreqAmp_accDBY<-lapplyBy(~c(user_name,classe), data=dat_main, function(x) AvFreq_Amp(x$NormT,x$accel_dumbbell_y))
+FreqAmp_accDBY <- ldply (FreqAmp_accDBY, data.frame)
+colnames(FreqAmp_accDBY)<-c("id","FreqaccDBY","AmpaccDBY")
+FreqAmp_magArmZ<-lapplyBy(~c(user_name,classe), data=dat_main, function(x) AvFreq_Amp(x$NormT,x$magnet_arm_z))
+FreqAmp_magArmZ <- ldply (FreqAmp_magArmZ, data.frame)
+colnames(FreqAmp_magArmZ)<-c("id","FreqmagArmZ","AmpmagArmZ")
+FreqAmp_magBeltY<-lapplyBy(~c(user_name,classe), data=dat_main, function(x) AvFreq_Amp(x$NormT,x$magnet_belt_y))
+FreqAmp_magBeltY <- ldply (FreqAmp_magBeltY, data.frame)
+colnames(FreqAmp_magBeltY)<-c("id","FreqmagBeltY","AmpmagBeltY")
+FreqAmp_GBeltZ<-lapplyBy(~c(user_name,classe), data=dat_main, function(x) AvFreq_Amp(x$NormT,x$gyros_belt_z))
+FreqAmp_GBeltZ <- ldply (FreqAmp_GBeltZ, data.frame)
+colnames(FreqAmp_GBeltZ)<-c("id","FreqGBeltZ","AmpGBeltZ")
+FreqAmp_magFarmX<-lapplyBy(~c(user_name,classe), data=dat_main, function(x) AvFreq_Amp(x$NormT,x$magnet_forearm_x))
+FreqAmp_magFarmX <- ldply (FreqAmp_magFarmX, data.frame)
+colnames(FreqAmp_magFarmX)<-c("id","FreqmagFarmX","AmpmagFarmX")
+FreqAmp_accDBX<-lapplyBy(~c(user_name,classe), data=dat_main, function(x) AvFreq_Amp(x$NormT,x$accel_dumbbell_x))
+FreqAmp_accDBX <- ldply (FreqAmp_accDBX, data.frame)
+colnames(FreqAmp_accDBX)<-c("id","FreqaccDBX","AmpaccDBX")
+FreqAmp_magBDBX<-lapplyBy(~c(user_name,classe), data=dat_main, function(x) AvFreq_Amp(x$NormT,x$magnet_dumbbell_x))
+FreqAmp_magBDBX <- ldply (FreqAmp_magBDBX, data.frame)
+colnames(FreqAmp_magBDBX)<-c("id","FreqmagBDBX","AmpmagBDBX")
+FreqAmp_accArmX<-lapplyBy(~c(user_name,classe), data=dat_main, function(x) AvFreq_Amp(x$NormT,x$accel_arm_x))
+FreqAmp_accArmX <- ldply (FreqAmp_accArmX, data.frame)
+colnames(FreqAmp_accArmX)<-c("id","FreqaccArmX","AmpaccArmX")
+FreqAmp_All<-cbind(FreqAmp_rollDB,FreqAmp_pitchDB,FreqAmp_magArmX,FreqAmp_accDBY,FreqAmp_magArmZ,FreqAmp_magBeltY,FreqAmp_GBeltZ,FreqAmp_magFarmX,FreqAmp_accDBX,FreqAmp_magBDBX,FreqAmp_accArmX)
+FreqAmp_All <- FreqAmp_All[, !duplicated(colnames(FreqAmp_All))]
+split_id<-strsplit(FreqAmp_All$id,split='|', fixed=TRUE)
+FreqAmp_All$user_name <- sapply(split_id, "[", 1)
+FreqAmp_All$classe <- sapply(split_id, "[", 2)
+FreqAmp_All<-FreqAmp_All[,-1]
+Aver_All2<-merge(FreqAmp_All,Aver_All,by=c("user_name","classe"))
+######################
+#Selecting new train and test sets after frequency and amplitude additions
+################
+Aver_Train<-subset(Aver_All2, !Aver_All2$user_name=="carlitos")
+Aver_Test<-subset(Aver_All2, Aver_All2$user_name=="carlitos")
+Aver_Train2<-Aver_Train[,-1] #removing user name
+Aver_Test2<-Aver_Test[,-1]    #removing user name
+###############################
+set.seed(62433)
+ForestTrain <- train(classe ~ ., method="rf", data=Aver_Train2)
+predRF<-predict(ForestTrain,Aver_Test2)
+#table(predRF,Aver_Test2$classe)
+varImp(ForestTrain)
+cm_rf<-confusionMatrix(data=predRF, Aver_Test2$classe); overall_rf <- cm_rf$overall; overall_rf
+```
+
+## Basic LDA model
+In the Machine Learning class, we learned about the Linear Discriminant Analysis (LDA) model, for preliminary information see https://en.wikipedia.org/wiki/Linear_discriminant_analysis. As shown in the table and accuracy results, this model overperformed the random forest model.
+
+```{r lda, echo=TRUE, message=FALSE, warning=FALSE}
+#################
+# Reverting to "Carlitos" test data without frequency variables
+Aver_Train<-subset(Aver_All2, !Aver_All2$user_name=="carlitos")
+Aver_Test<-subset(Aver_All2, Aver_All2$user_name=="carlitos")
+Aver_Train2<-Aver_Train[,-1] #removing user name from model prediction evaluation
+Aver_Test2<-Aver_Test[,-1]
+set.seed(62433)
+ldaTrain <- train(classe ~ ., method="lda", data=Aver_Train2)
+predlda1<-predict(ldaTrain,Aver_Test2)
+table(predlda1,Aver_Test2$classe)
+cm_lda<-confusionMatrix(data=predlda1, Aver_Test2$classe); overall_lda <- cm_lda$overall; overall_lda
+```
+
+## PCA and LDA model
+Testing the orthogonalized variables (PCA) with the LDA model. As shown below, the variable orthogonalization improved the LDA model response to reach 100% accuracy for the selected test data. To further test the efficacy of this model, I modified the train and test set to a new user as shown in the next sections.
+
+```{r PCAlda, echo=TRUE, message=FALSE, warning=FALSE}
+#With PCA, thresh = 0.9
+preProc <- preProcess(Aver_Train2[,-1],method="pca",thresh = 0.9)
+trainPC <- predict(preProc,Aver_Train2[,-1]) # removing "classe" so it is not orthogonalized with the others 
+trainPC$classe<-Aver_Train2$classe # adding "classe" back
+modelFit <- train(classe ~ .,method="lda",data=trainPC)
+testPC <- predict(preProc,Aver_Test2[,-1])
+table(predict(modelFit,testPC),Aver_Test2$classe)
+cm_lda2<-confusionMatrix(Aver_Test2$classe,predict(modelFit,testPC)); overall_lda2 <- cm_lda2$overall; overall_lda2
+``` 
+
+## What if "charles" data was used for test set instead?
+In this portion I selected " Charles" user_name for the new test set to evaluate the accuracy of the PCA and LDA model. With "charles" data as test set, the model's accuracy decreased to 80%.
+
+```{r charles, echo=FALSE, message=FALSE, warning=FALSE}
+#Selecting another subject
+Aver_Train<-subset(Aver_All2, !Aver_All2$user_name=="charles")
+Aver_Test<-subset(Aver_All2, Aver_All2$user_name=="charles")
+Aver_Train2<-Aver_Train[,-1]
+Aver_Test2<-Aver_Test[,-1]
+################
+#With PCA, thresh = 0.9
+preProc <- preProcess(Aver_Train2[,-1],method="pca",thresh = 0.9)
+trainPC <- predict(preProc,Aver_Train2[,-1]) # removing "classe" so it is not orthogonalized with the others 
+trainPC$classe<-Aver_Train2$classe # adding "classe" back
+modelFit <- train(classe ~ .,method="lda",data=trainPC)
+testPC <- predict(preProc,Aver_Test2[,-1])
+table(predict(modelFit,testPC),Aver_Test2$classe)
+cm_lda3<-confusionMatrix(Aver_Test2$classe,predict(modelFit,testPC)); overall_lda3 <- cm_lda3$overall; overall_lda3
+#############
+```
+## What if "pedro" data was used for test set instead? 
+In this portion I selected "pedro" user_name for the new test set to evaluate the accuracy of the PCA and LDA model. With "pedro" data as test set, the model's accuracy decreased to 40%. 
+```{r pedro, echo=FALSE, message=FALSE, warning=FALSE}
+#Selecting another subject
+Aver_Train<-subset(Aver_All2, !Aver_All2$user_name=="pedro")
+Aver_Test<-subset(Aver_All2, Aver_All2$user_name=="pedro")
+Aver_Train2<-Aver_Train[,-1]
+Aver_Test2<-Aver_Test[,-1]
+################
+#With PCA, thresh = 0.9
+preProc <- preProcess(Aver_Train2[,-1],method="pca",thresh = 0.9)
+trainPC <- predict(preProc,Aver_Train2[,-1]) # removing "classe" so it is not orthogonalized with the others 
+trainPC$classe<-Aver_Train2$classe # adding "classe" back
+modelFit <- train(classe ~ .,method="lda",data=trainPC)
+testPC <- predict(preProc,Aver_Test2[,-1])
+table(predict(modelFit,testPC),Aver_Test2$classe)
+cm_lda4<-confusionMatrix(Aver_Test2$classe,predict(modelFit,testPC)); overall_lda4 <- cm_lda4$overall; overall_lda4
+#############
+```
+## What if "adelmo" data was used for test set instead? 
+In this portion I selected "adelmo" user_name for the new test set to evaluate the accuracy of the PCA and LDA model. With "adelmo" data as test set, the model's accuracy reached 100%.
+```{r adelmo, echo=FALSE, message=FALSE, warning=FALSE}
+#Selecting another subject
+Aver_Train<-subset(Aver_All2, !Aver_All2$user_name=="adelmo")
+Aver_Test<-subset(Aver_All2, Aver_All2$user_name=="adelmo")
+Aver_Train2<-Aver_Train[,-1]
+Aver_Test2<-Aver_Test[,-1]
+################
+#With PCA, thresh = 0.9
+preProc <- preProcess(Aver_Train2[,-1],method="pca",thresh = 0.9)
+trainPC <- predict(preProc,Aver_Train2[,-1]) # removing "classe" so it is not orthogonalized with the others 
+trainPC$classe<-Aver_Train2$classe # adding "classe" back
+modelFit <- train(classe ~ .,method="lda",data=trainPC)
+testPC <- predict(preProc,Aver_Test2[,-1])
+table(predict(modelFit,testPC),Aver_Test2$classe)
+cm_lda4<-confusionMatrix(Aver_Test2$classe,predict(modelFit,testPC)); overall_lda4 <- cm_lda4$overall; overall_lda4
+#############
+```
+## What if "eurico" data was used for test set instead? 
+In this portion I selected "eurico" user_name for the new test set to evaluate the accuracy of the PCA and LDA model. With "eurico" data as test set, the model's accuracy decreased to 40%.
+```{r eurico, echo=FALSE, message=FALSE, warning=FALSE}
+#Selecting another subject
+Aver_Train<-subset(Aver_All2, !Aver_All2$user_name=="eurico")
+Aver_Test<-subset(Aver_All2, Aver_All2$user_name=="eurico")
+Aver_Train2<-Aver_Train[,-1]
+Aver_Test2<-Aver_Test[,-1]
+################
+#With PCA, thresh = 0.9
+preProc <- preProcess(Aver_Train2[,-1],method="pca",thresh = 0.9)
+trainPC <- predict(preProc,Aver_Train2[,-1]) # removing "classe" so it is not orthogonalized with the others 
+trainPC$classe<-Aver_Train2$classe # adding "classe" back
+modelFit <- train(classe ~ .,method="lda",data=trainPC)
+testPC <- predict(preProc,Aver_Test2[,-1])
+table(predict(modelFit,testPC),Aver_Test2$classe)
+cm_lda4<-confusionMatrix(Aver_Test2$classe,predict(modelFit,testPC)); overall_lda4 <- cm_lda4$overall; overall_lda4
+#############
+```
+
+## What if "jeremy" data was used for test set instead? 
+In this portion I selected "jeremy" user_name for the new test set to evaluate the accuracy of the PCA and LDA model. With "jeremy" data as test set, the model's accuracy reached 100%.
+```{r jeremy, echo=FALSE, message=FALSE, warning=FALSE}
+#Selecting another subject
+Aver_Train<-subset(Aver_All2, !Aver_All2$user_name=="jeremy")
+Aver_Test<-subset(Aver_All2, Aver_All2$user_name=="jeremy")
+Aver_Train2<-Aver_Train[,-1]
+Aver_Test2<-Aver_Test[,-1]
+################
+#With PCA, thresh = 0.9
+preProc <- preProcess(Aver_Train2[,-1],method="pca",thresh = 0.9)
+trainPC <- predict(preProc,Aver_Train2[,-1]) # removing "classe" so it is not orthogonalized with the others 
+trainPC$classe<-Aver_Train2$classe # adding "classe" back
+modelFit <- train(classe ~ .,method="lda",data=trainPC)
+testPC <- predict(preProc,Aver_Test2[,-1])
+table(predict(modelFit,testPC),Aver_Test2$classe)
+cm_lda4<-confusionMatrix(Aver_Test2$classe,predict(modelFit,testPC)); overall_lda4 <- cm_lda4$overall; overall_lda4
+#############
+```
+
+## Conclusions
+In this report a solution for the coursera test set was provided without the need of using a model but a timestamp correlation. Therefore a new test set was proposed in which the data from one of the participants could be used as test set. A set of covariates were calculated for the train and test sets that included mean value, standard deviations, max-min, mean frequency and max frequency amplitude. The model that best worked for all the selected test sets was a combination of Principal Component Analysis (PCA) method with the Latent Dirichlet allocation (LDA) model. The model reached 100% when "carlitos", "adelmo", or "jeremy" were used as test sets. It reached 80% accuracy when "charles" was used as the test set, and 40% accuracy when "eurico" or "pedro" were used as the test set. For the low accuracy users, "classe" B was overfitted with the models having difficulty differentiating "classe" B from A, the correct way of doing the exercise. With this model strategy, a feature could be designed such that it alerts the user of possible set up error or poor excersice performance to repeat/improve the data collection.  Nevertheless, it is impressive that for three of the test sets, the accuracies reached 100% with training data of only 5 participants. 
